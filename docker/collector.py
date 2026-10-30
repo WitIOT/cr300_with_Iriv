@@ -149,13 +149,17 @@ def op(fn, tries=4):
     raise RuntimeError(f"op failed: {last}")
 
 
+def rnd(v):
+    return round(v, 4) if isinstance(v, float) else v
+
+
 def clean_row(raw):
     """-> (recnbr, logger_dt, local_dt, cleaned_row_dict, numeric_fields_dict)."""
     row = {ckey(k): v for k, v in raw.items()}
     rn = rec_nbr(row)
     ldt = row.get("Datetime")
     local = (ldt + OFFSET) if isinstance(ldt, dt.datetime) else None
-    fields = {k: v for k, v in row.items()
+    fields = {k: rnd(v) for k, v in row.items()
               if k not in ("Datetime", "RecNbr", "RecNum") and good(v)}
     return rn, ldt, local, row, fields
 
@@ -168,8 +172,10 @@ def write_csv(directory, rn, local, row):
     for k, v in row.items():
         if k in ("Datetime", "RecNbr", "RecNum"):
             continue
-        if isinstance(v, float) and math.isnan(v):
-            v = ""
+        if isinstance(v, (bytes, bytearray)):
+            continue  # skip binary fields (e.g. CVMeta)
+        if isinstance(v, float):
+            v = "" if math.isnan(v) else round(v, 4)
         out[k] = v
     new = not path.exists()
     with path.open("a", newline="") as f:
