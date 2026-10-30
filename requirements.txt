@@ -1,0 +1,7 @@
+# CR300 -> IRIV PiControl pipeline
+pycampbellcr1000      # PakBus over serial/tcp (data pull)
+pyserial              # serial layer + SerialOut push fallback
+influxdb-client       # InfluxDB v2.x client (see README for v1/v3)
+fastapi
+uvicorn[standard]
+python-dotenv

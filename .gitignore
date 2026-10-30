@@ -1,0 +1,20 @@
+# runtime data (never commit station data)
+data/
+**/data/
+*.csv
+*.dat
+
+# local env with secrets (tokens, passwords) — use .env.example as template
+.env
+**/.env
+!**/.env.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store
+Thumbs.db

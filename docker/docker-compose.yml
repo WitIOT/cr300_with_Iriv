@@ -1,0 +1,30 @@
+services:
+  collector:
+    build: .
+    image: cr300-pipeline
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # inside the container the device is always /dev/cr300
+      - CR300_URL=serial:/dev/cr300:115200
+      - DATA_HOME=/data
+    devices:
+      # map this host's serial device -> /dev/cr300 in the container
+      - "${SERIAL_DEV:-/dev/cr300}:/dev/cr300"
+    volumes:
+      - ./data:/data
+    command: ["python", "collector.py"]
+
+  api:
+    build: .
+    image: cr300-pipeline
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_HOME=/data
+      - API_PORT=8000
+    volumes:
+      - ./data:/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    command: ["python", "api.py"]
