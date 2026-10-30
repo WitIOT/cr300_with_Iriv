@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Zero-dependency REST API for CR300 data (reads the collector's CSV files).
 
-Serves data the collector writes to ~/cr300/data/ . No pip installs, no DB.
+Serves both data streams the collector writes under DATA_HOME:
+  - averaged : data/csv/      (Every60, hourly)  -> default stream
+  - live     : data/public/   (Public snapshots) -> ?stream=live
+
+No pip installs, no DB.
 
 Endpoints:
-  GET /                      -> list of endpoints
-  GET /health                -> {"status":"ok", ...}
-  GET /latest                -> newest record (from latest.json)
-  GET /records?date=YYYY-MM-DD   -> all rows for that day
-  GET /records?hours=N           -> rows from the last N hours (default 24)
-  GET /records?...&raw=1         -> keep -8190 / blank NAN values (default: dropped)
-  GET /fields                -> list of column names seen
-  GET /days                  -> list of dates that have data
-  GET /csv/YYYY-MM-DD        -> download that day's raw CSV
+  GET /                           -> list of endpoints
+  GET /health                     -> {"status":"ok", ...}
+  GET /latest                     -> newest averaged record (latest.json)
+  GET /live                       -> newest live snapshot (latest_public.json)
+  GET /records?hours=N            -> averaged rows, last N hours (default 24)
+  GET /records?date=YYYY-MM-DD    -> averaged rows for that day
+  GET /records?stream=live&...    -> same queries against the live stream
+  GET /records?...&raw=1          -> keep -8190 / blank NAN values
+  GET /fields?stream=live|averaged
+  GET /days?stream=live|averaged
+  GET /csv/YYYY-MM-DD?stream=live|averaged   -> raw CSV download
 
 Config via env:
   DATA_HOME=~/cr300/data   API_HOST=0.0.0.0   API_PORT=8000   STATION=narit_cr300
@@ -26,22 +32,26 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 HOME = Path(os.path.expanduser(os.getenv("DATA_HOME", "~/cr300/data")))
-CSV_DIR = HOME / "csv"
-LATEST_FILE = HOME / "latest.json"
+DIRS = {"averaged": HOME / "csv", "live": HOME / "public"}
+LATEST = {"averaged": HOME / "latest.json", "live": HOME / "latest_public.json"}
 HOST = os.getenv("API_HOST", "0.0.0.0")
 PORT = int(os.getenv("API_PORT", "8000"))
 STATION = os.getenv("STATION", "narit_cr300")
 NODATA = "-8190.0"
 
 
-def day_files():
-    if not CSV_DIR.exists():
-        return []
-    return sorted(CSV_DIR.glob("*.csv"))
+def stream_of(q):
+    s = q.get("stream", ["averaged"])[0]
+    return s if s in DIRS else "averaged"
 
 
-def read_day(date_str, drop_nan=True):
-    path = CSV_DIR / f"{date_str}.csv"
+def day_files(stream):
+    d = DIRS[stream]
+    return sorted(d.glob("*.csv")) if d.exists() else []
+
+
+def read_day(stream, date_str, drop_nan=True):
+    path = DIRS[stream] / f"{date_str}.csv"
     if not path.exists():
         return []
     rows = []
@@ -55,9 +65,8 @@ def read_day(date_str, drop_nan=True):
 
 
 def parse_ts(r):
-    ts = r.get("TimeStamp", "")
     try:
-        return dt.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        return dt.datetime.strptime(r.get("TimeStamp", ""), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
 
@@ -76,55 +85,62 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *a):
-        pass  # quiet
+        pass
 
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         drop = q.get("raw", ["0"])[0] not in ("1", "true", "yes")
+        stream = stream_of(q)
         try:
             if u.path == "/":
-                self._send({"station": STATION, "endpoints": [
-                    "/health", "/latest", "/records?hours=24",
-                    "/records?date=YYYY-MM-DD", "/fields", "/days",
-                    "/csv/YYYY-MM-DD"]})
+                self._send({"station": STATION, "streams": list(DIRS),
+                            "endpoints": [
+                                "/health", "/latest", "/live",
+                                "/records?hours=24", "/records?stream=live&hours=2",
+                                "/records?date=YYYY-MM-DD", "/fields", "/days",
+                                "/csv/YYYY-MM-DD"]})
             elif u.path == "/health":
                 self._send({"status": "ok", "station": STATION,
                             "now": dt.datetime.now().isoformat(),
-                            "days": len(day_files())})
+                            "averaged_days": len(day_files("averaged")),
+                            "live_days": len(day_files("live"))})
             elif u.path == "/latest":
-                if LATEST_FILE.exists():
-                    self._send(json.loads(LATEST_FILE.read_text()))
-                else:
-                    self._send({"error": "no data yet"}, 503)
+                f = LATEST["averaged"]
+                self._send(json.loads(f.read_text()) if f.exists()
+                           else {"error": "no data yet"}, 200 if f.exists() else 503)
+            elif u.path == "/live":
+                f = LATEST["live"]
+                self._send(json.loads(f.read_text()) if f.exists()
+                           else {"error": "no live data yet"}, 200 if f.exists() else 503)
             elif u.path == "/days":
-                self._send({"days": [p.stem for p in day_files()]})
+                self._send({"stream": stream,
+                            "days": [p.stem for p in day_files(stream)]})
             elif u.path == "/fields":
                 flds = set()
-                for p in day_files():
+                for p in day_files(stream):
                     with p.open(newline="") as f:
                         flds.update(next(csv.reader(f), []))
-                self._send({"fields": sorted(flds)})
+                self._send({"stream": stream, "fields": sorted(flds)})
             elif u.path == "/records":
                 if "date" in q:
-                    rows = read_day(q["date"][0], drop)
+                    rows = read_day(stream, q["date"][0], drop)
                 else:
                     hours = int(q.get("hours", ["24"])[0])
                     cutoff = dt.datetime.now() - dt.timedelta(hours=hours)
                     rows = []
-                    # read last 2 day-files (enough to cover any hours<=48)
-                    for p in day_files()[-3:]:
-                        for r in read_day(p.stem, drop):
+                    for p in day_files(stream)[-3:]:
+                        for r in read_day(stream, p.stem, drop):
                             ts = parse_ts(r)
                             if ts and ts >= cutoff:
                                 rows.append(r)
                     rows.sort(key=lambda r: r.get("TimeStamp", ""))
-                self._send({"station": STATION, "count": len(rows),
-                            "records": rows})
+                self._send({"station": STATION, "stream": stream,
+                            "count": len(rows), "records": rows})
             elif u.path.startswith("/csv/"):
                 name = u.path[len("/csv/"):]
-                p = CSV_DIR / f"{name}.csv"
-                if p.exists() and p.parent == CSV_DIR:
+                p = DIRS[stream] / f"{name}.csv"
+                if p.exists() and p.parent == DIRS[stream]:
                     self._send(p.read_bytes(), ctype="text/csv")
                 else:
                     self._send({"error": "not found"}, 404)
