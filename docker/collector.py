@@ -218,18 +218,37 @@ def poll_averaged(st):
 
 
 # ---- stream 2: live / Public table snapshot ----
+def read_public(d):
+    """Read the current Public record via collect-all (mode 0x03).
+
+    get_data() uses a time-range collect that returns nothing for Public
+    (it stores only the current scan, not a time series). collect-all returns
+    that one current record. Returns a raw dict compatible with clean_row().
+    """
+    d.ping_node()
+    data, _more = d._collect_data(PUBLIC_TABLE)
+    best = None
+    for rec in data:
+        if not rec.get("NbrOfRecs"):
+            continue
+        for item in rec.get("RecFrag", []):
+            best = item
+    if best is None:
+        return None
+    raw = {"Datetime": best.get("TimeOfRec"), "RecNbr": best.get("RecNbr")}
+    raw.update(dict(best.get("Fields", {})))
+    return raw
+
+
 def poll_public(st):
-    logger_now = op(lambda d: d.gettime())
-    raws = op(lambda d: d.get_data(
-        PUBLIC_TABLE, logger_now - dt.timedelta(minutes=5),
-        logger_now + dt.timedelta(minutes=1)))
-    if not raws:
+    raw = op(lambda d: read_public(d))
+    if not raw:
         log("[live] empty read")
         return
-    rn, ldt, local, row, fields = clean_row(raws[-1])
+    rn, ldt, local, row, fields = clean_row(raw)
     # timestamp: prefer the record's own, else the logger clock (+offset)
     if local is None:
-        local = logger_now + OFFSET
+        local = op(lambda d: d.gettime()) + OFFSET
     stamp = local.strftime("%Y-%m-%d %H:%M:%S")
     if st.get("last_public_time") == stamp:
         log("[live] no change")
